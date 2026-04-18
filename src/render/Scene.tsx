@@ -27,7 +27,7 @@ export function Scene() {
 
   return (
     <Canvas
-      camera={{ position: [0, 80, 45], fov: 45 }}
+      camera={{ position: [55, 75, 55], fov: 42 }}
       shadows
       gl={{ antialias: true }}
       style={{ width: '100vw', height: '100vh' }}
