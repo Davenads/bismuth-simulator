@@ -11,11 +11,11 @@ export function Controls() {
         onChange: (v) => setParams({ coolingRate: v }),
       },
       supersaturation: {
-        value: 0.6, min: 0.1, max: 1.0, step: 0.01, label: 'Supersaturation',
+        value: 0.5, min: 0.1, max: 1.0, step: 0.01, label: 'Supersaturation',
         onChange: (v) => setParams({ supersaturation: v }),
       },
       anisotropy: {
-        value: 7.0, min: 1.0, max: 12.0, step: 0.1, label: 'Anisotropy',
+        value: 8.0, min: 1.0, max: 12.0, step: 0.1, label: 'Anisotropy',
         onChange: (v) => setParams({ anisotropy: v }),
       },
       temperature: {

@@ -11,9 +11,9 @@ export interface SimParams {
 
 export const DEFAULT_PARAMS: SimParams = {
   gridSize: 40,
-  coolingRate: 0.3,
-  supersaturation: 0.6,
-  anisotropy: 7.0,
+  coolingRate: 0.25,
+  supersaturation: 0.5,
+  anisotropy: 8.0,
   defectRate: 0.005,
   seedCount: 1,
   temperature: 0.2,
