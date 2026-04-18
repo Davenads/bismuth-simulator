@@ -2,7 +2,7 @@ import { SimParams } from './params'
 import { key, fromKey } from './lattice'
 
 export interface LatticeState {
-  filled: Map<number, number>  // encoded key -> step filled
+  filled: Map<number, number>
   step: number
   gridSize: number
 }
@@ -11,37 +11,7 @@ function inBounds(i: number, j: number, k: number, half: number): boolean {
   return Math.abs(i) <= half && Math.abs(j) <= half && Math.abs(k) <= half
 }
 
-// The 8 [111]-family corner directions (normalised)
-const INV_SQRT3 = 1 / Math.sqrt(3)
-const CORNER_DIRS: [number, number, number][] = [
-  [ 1, 1, 1], [-1, 1, 1], [ 1,-1, 1], [ 1, 1,-1],
-  [-1,-1, 1], [-1, 1,-1], [ 1,-1,-1], [-1,-1,-1],
-].map(([x,y,z]) => [x*INV_SQRT3, y*INV_SQRT3, z*INV_SQRT3] as [number,number,number])
-
-// How well does direction (di,dj,dk) from the crystal centroid point toward a [111] corner?
-// Returns: 1.0 at a pure corner direction, ~0.816 at an edge, ~0.577 at a face-center.
-function cornerAlignment(di: number, dj: number, dk: number): number {
-  const len = Math.sqrt(di*di + dj*dj + dk*dk)
-  if (len < 1e-6) return 0
-  const nx = di/len, ny = dj/len, nz = dk/len
-  let best = 0
-  for (const [cx, cy, cz] of CORNER_DIRS) {
-    const dot = nx*cx + ny*cy + nz*cz
-    if (dot > best) best = dot
-  }
-  return best
-}
-
-// Count distinct axis directions that have at least one filled face-neighbor.
-// A corner site of the crystal has 3; an edge site 2; a flat face site 1.
-function axisConnectivity(i: number, j: number, k: number, filled: Map<number,number>): number {
-  const x = filled.has(key(i+1,j,k)) || filled.has(key(i-1,j,k))
-  const y = filled.has(key(i,j+1,k)) || filled.has(key(i,j-1,k))
-  const z = filled.has(key(i,j,k+1)) || filled.has(key(i,j,k-1))
-  return (x ? 1 : 0) + (y ? 1 : 0) + (z ? 1 : 0)
-}
-
-const FACE6: [number,number,number][] = [
+const FACE6: [number, number, number][] = [
   [1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],
 ]
 
@@ -63,7 +33,6 @@ export function createInitialState(params: SimParams): LatticeState {
       }
     }
   }
-
   return { filled, step: 0, gridSize: params.gridSize }
 }
 
@@ -72,16 +41,24 @@ export function tick(state: LatticeState, params: SimParams): LatticeState {
   const half = Math.floor(gridSize / 2)
   const nextFilled = new Map(filled)
 
-  // Crystal centroid — anchor for global direction scoring
+  // Crystal centroid — anchor for the hopper geometry test
   let cx = 0, cy = 0, cz = 0
   for (const [k] of filled) {
     const [i, j, kk] = fromKey(k)
     cx += i; cy += j; cz += kk
   }
-  const count = filled.size || 1
-  cx /= count; cy /= count; cz /= count
+  const n = filled.size || 1
+  cx /= n; cy /= n; cz /= n
 
-  // Face-adjacent empty candidates
+  // hollowThreshold: the ratio b/a below which a site is permanently excluded.
+  // b/a = 1.0  → corner or edge direction (always grows)
+  // b/a = 0.0  → pure face-center direction (always hollow)
+  //
+  // Higher anisotropy = higher threshold = more of the face is hollow.
+  // Mapping: aniso 1 → threshold 0 (solid), aniso 12 → threshold 0.88 (very hollow).
+  const hollowThreshold = Math.min(0.88, (params.anisotropy - 1) / 11 * 0.97)
+
+  // Collect face-adjacent empty candidates
   const candidates = new Set<number>()
   for (const [k] of filled) {
     const [i, j, kk] = fromKey(k)
@@ -96,32 +73,31 @@ export function tick(state: LatticeState, params: SimParams): LatticeState {
 
   const coolingFactor = Math.max(0.05, 1 - params.coolingRate * (step / params.maxSteps))
 
-  // Exponent is doubled so that the face-center direction (alignment ≈ 0.577) collapses
-  // to near-zero probability even at moderate anisotropy values, while corners (≈ 0.94)
-  // remain viable. This prevents the cube-filling problem where face sites slowly
-  // accumulate over hundreds of steps.
-  const exponent = params.anisotropy * 2
-
   for (const nk of candidates) {
     const [ni, nj, nkk] = fromKey(nk)
 
-    // Global: how corner-ward is this site from the crystal center?
-    const alignment = cornerAlignment(ni - cx, nj - cy, nkk - cz)
+    const ai = Math.abs(ni - cx)
+    const aj = Math.abs(nj - cy)
+    const ak = Math.abs(nkk - cz)
 
-    // Local: how many crystal-facing axes does this site already border?
-    // Acts as a secondary growth driver — once edges form, they pull adjacent sites in.
-    const axes = axisConnectivity(ni, nj, nkk, filled)
-    const localBonus = axes >= 3 ? 2.0 : axes === 2 ? 1.4 : 1.0
+    // Sort absolute coords descending: a ≥ b ≥ c
+    let a = ai, b = aj, c = ak
+    if (a < b) { const t = a; a = b; b = t }
+    if (a < c) { const t = a; a = c; c = t }
+    if (b < c) { const t = b; b = c; c = t }
 
-    // Growth probability: corner-alignment is the dominant term.
-    // Face-center: alignment ≈ 0.577, 0.577^(7*2) ≈ 0.000001 → effectively zero
-    // Corner:      alignment ≈ 0.940, 0.940^(7*2) ≈ 0.180    → active growth
-    const dirScore = Math.pow(alignment, exponent)
-    const thermalNoise = (Math.random() - 0.5) * params.temperature
-    const p = Math.min(1, Math.max(0,
-      params.supersaturation * dirScore * localBonus * coolingFactor + thermalNoise
-    ))
+    // b/a captures surface type:
+    //   1.0 = corner [1,1,1] or edge [1,1,0] direction from centroid → grows
+    //   0.0 = face-center [1,0,0] direction → hollow
+    const ratio = a > 0.5 ? b / a : 1.0
 
+    // Add slight fuzz at the boundary so the hollow edge looks natural, not aliased.
+    const fuzz = (Math.random() - 0.5) * params.temperature * 0.15
+    if (ratio + fuzz < hollowThreshold) continue  // permanently in hollow zone
+
+    // All non-hollow surface sites grow probabilistically
+    const noise = (Math.random() - 0.5) * params.temperature
+    const p = Math.min(1, Math.max(0, params.supersaturation * coolingFactor + noise))
     if (Math.random() < p) nextFilled.set(nk, step + 1)
   }
 
