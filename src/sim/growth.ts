@@ -11,18 +11,31 @@ function inBounds(i: number, j: number, k: number, half: number): boolean {
   return Math.abs(i) <= half && Math.abs(j) <= half && Math.abs(k) <= half
 }
 
-// Count how many distinct face-axis directions have a filled neighbor.
-// Corner = 3 axes filled, Edge = 2, Face = 1, Interior = impossible (already filled).
-// This is the right anisotropy driver for hopper crystal growth.
-function axisConnectivity(
-  i: number, j: number, k: number,
-  filled: Map<number, number>
-): number {
-  const xFilled = filled.has(key(i + 1, j, k)) || filled.has(key(i - 1, j, k))
-  const yFilled = filled.has(key(i, j + 1, k)) || filled.has(key(i, j - 1, k))
-  const zFilled = filled.has(key(i, j, k + 1)) || filled.has(key(i, j, k - 1))
-  return (xFilled ? 1 : 0) + (yFilled ? 1 : 0) + (zFilled ? 1 : 0)
+// The 8 [111]-family directions (normalised) — bismuth's fast-growth corners
+const INV_SQRT3 = 1 / Math.sqrt(3)
+const CORNER_DIRS: [number, number, number][] = [
+  [ 1, 1, 1], [-1, 1, 1], [ 1,-1, 1], [ 1, 1,-1],
+  [-1,-1, 1], [-1, 1,-1], [ 1,-1,-1], [-1,-1,-1],
+].map(([x,y,z]) => [x * INV_SQRT3, y * INV_SQRT3, z * INV_SQRT3] as [number,number,number])
+
+// How closely does direction (di,dj,dk) from crystal center point toward any [111] corner?
+// Returns 1.0 at a perfect corner, ~0.577 at a face-center direction.
+function cornerAlignment(di: number, dj: number, dk: number): number {
+  const len = Math.sqrt(di * di + dj * dj + dk * dk)
+  if (len < 1e-6) return 0
+  const nx = di / len, ny = dj / len, nz = dk / len
+  let best = 0
+  for (const [cx, cy, cz] of CORNER_DIRS) {
+    const dot = nx * cx + ny * cy + nz * cz
+    if (dot > best) best = dot
+  }
+  return best
 }
+
+// Face-direction offsets only — candidates must be directly adjacent to crystal
+const FACE6: [number,number,number][] = [
+  [1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],
+]
 
 export function createInitialState(params: SimParams): LatticeState {
   const filled = new Map<number, number>()
@@ -37,9 +50,7 @@ export function createInitialState(params: SimParams): LatticeState {
       for (let dj = -1; dj <= 1; dj++) {
         for (let dk = -1; dk <= 1; dk++) {
           const ni = si + di, nj = sj + dj, nk = dk
-          if (inBounds(ni, nj, nk, half)) {
-            filled.set(key(ni, nj, nk), 0)
-          }
+          if (inBounds(ni, nj, nk, half)) filled.set(key(ni, nj, nk), 0)
         }
       }
     }
@@ -48,17 +59,21 @@ export function createInitialState(params: SimParams): LatticeState {
   return { filled, step: 0, gridSize: params.gridSize }
 }
 
-// Face-direction deltas only (no diagonals in scoring)
-const FACE6: [number,number,number][] = [
-  [1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],
-]
-
 export function tick(state: LatticeState, params: SimParams): LatticeState {
   const { filled, step, gridSize } = state
   const half = Math.floor(gridSize / 2)
   const nextFilled = new Map(filled)
 
-  // Collect all empty face-adjacent candidates once
+  // Compute crystal centroid — used to score outward direction of each candidate
+  let cx = 0, cy = 0, cz = 0
+  for (const [k] of filled) {
+    const [i, j, kk] = fromKey(k)
+    cx += i; cy += j; cz += kk
+  }
+  const n = filled.size || 1
+  cx /= n; cy /= n; cz /= n
+
+  // Collect face-adjacent empty candidates
   const candidates = new Set<number>()
   for (const [k] of filled) {
     const [i, j, kk] = fromKey(k)
@@ -75,23 +90,19 @@ export function tick(state: LatticeState, params: SimParams): LatticeState {
 
   for (const nk of candidates) {
     const [ni, nj, nkk] = fromKey(nk)
-    const axes = axisConnectivity(ni, nj, nkk, filled)
 
-    // Growth probability by connectivity type:
-    // corner (axes=3): very high
-    // edge   (axes=2): medium
-    // face   (axes=1): very low → creates hollow hopper effect
-    let baseP: number
-    if (axes === 3) {
-      baseP = params.supersaturation * Math.pow(params.anisotropy / 12, 0.3)
-    } else if (axes === 2) {
-      baseP = params.supersaturation * 0.35
-    } else {
-      baseP = params.supersaturation * (1 / params.anisotropy) * 0.15
-    }
+    // Direction from crystal center to this candidate
+    const alignment = cornerAlignment(ni - cx, nj - cy, nkk - cz)
+
+    // alignment ≈ 1.0 at crystal corners → very high P
+    // alignment ≈ 0.577 at face centers → very low P (especially with high anisotropy)
+    // anisotropy controls how sharply the corner preference falls off
+    const dirScore = Math.pow(alignment, params.anisotropy)
 
     const thermalNoise = (Math.random() - 0.5) * params.temperature
-    const p = Math.min(1, Math.max(0, baseP * coolingFactor + thermalNoise))
+    const p = Math.min(1, Math.max(0,
+      params.supersaturation * dirScore * coolingFactor + thermalNoise
+    ))
 
     if (Math.random() < p) nextFilled.set(nk, step + 1)
   }
