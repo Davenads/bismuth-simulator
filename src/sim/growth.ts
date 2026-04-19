@@ -24,12 +24,11 @@ export function createInitialState(params: SimParams): LatticeState {
     const spread = params.seedCount > 1 ? Math.floor(params.gridSize / 5) : 0
     const si = Math.round(Math.cos(angle) * spread)
     const sj = Math.round(Math.sin(angle) * spread)
-    for (let di = -1; di <= 1; di++) {
-      for (let dj = -1; dj <= 1; dj++) {
-        for (let dk = -1; dk <= 1; dk++) {
-          const ni = si+di, nj = sj+dj, nk = dk
-          if (inBounds(ni, nj, nk, half)) filled.set(key(ni, nj, nk), 0)
-        }
+    // Flat seed in XY plane (just one layer thick) to seed upward pyramid growth
+    for (let di = -2; di <= 2; di++) {
+      for (let dj = -2; dj <= 2; dj++) {
+        const ni = si + di, nj = sj + dj, nk = 0
+        if (inBounds(ni, nj, nk, half)) filled.set(key(ni, nj, nk), 0)
       }
     }
   }
@@ -41,24 +40,28 @@ export function tick(state: LatticeState, params: SimParams): LatticeState {
   const half = Math.floor(gridSize / 2)
   const nextFilled = new Map(filled)
 
-  // Crystal centroid — anchor for the hopper geometry test
-  let cx = 0, cy = 0, cz = 0
+  // Crystal statistics: max height, max lateral radius, centroid XY
+  let maxK = -Infinity, maxLat = 0
+  let cx = 0, cy = 0
   for (const [k] of filled) {
     const [i, j, kk] = fromKey(k)
-    cx += i; cy += j; cz += kk
+    if (kk > maxK) maxK = kk
+    cx += i; cy += j
+    const lat = Math.max(Math.abs(i), Math.abs(j))
+    if (lat > maxLat) maxLat = lat
   }
   const n = filled.size || 1
-  cx /= n; cy /= n; cz /= n
+  cx /= n; cy /= n
 
-  // hollowThreshold: the ratio b/a below which a site is permanently excluded.
-  // b/a = 1.0  → corner or edge direction (always grows)
-  // b/a = 0.0  → pure face-center direction (always hollow)
-  //
-  // Higher anisotropy = higher threshold = more of the face is hollow.
-  // Mapping: aniso 1 → threshold 0 (solid), aniso 12 → threshold 0.88 (very hollow).
-  const hollowThreshold = Math.min(0.88, (params.anisotropy - 1) / 11 * 0.97)
+  // hollowFraction: what fraction of the top face stays hollow (face-centre excluded).
+  // Higher anisotropy → larger hollow centre.
+  const hollowFraction = Math.min(0.90, (params.anisotropy - 1) / 11 * 0.95)
 
-  // Collect face-adjacent empty candidates
+  // Pyramid slope: how many units of lateral extent are lost per unit of height above maxK.
+  // Higher anisotropy → steeper pyramid (less lateral spread per height gained).
+  const slopePerLayer = Math.max(0.1, 2.0 / params.anisotropy)
+
+  // Face-adjacent empty candidates
   const candidates = new Set<number>()
   for (const [k] of filled) {
     const [i, j, kk] = fromKey(k)
@@ -76,28 +79,57 @@ export function tick(state: LatticeState, params: SimParams): LatticeState {
   for (const nk of candidates) {
     const [ni, nj, nkk] = fromKey(nk)
 
-    const ai = Math.abs(ni - cx)
-    const aj = Math.abs(nj - cy)
-    const ak = Math.abs(nkk - cz)
+    const lat = Math.max(Math.abs(ni - cx), Math.abs(nj - cy))
+    const isAboveTop = nkk > maxK
 
-    // Sort absolute coords descending: a ≥ b ≥ c
-    let a = ai, b = aj, c = ak
-    if (a < b) { const t = a; a = b; b = t }
-    if (a < c) { const t = a; a = c; c = t }
-    if (b < c) { const t = b; b = c; c = t }
+    // ── Pyramid shape gate ──────────────────────────────────────────────────
+    // Sites above the current top must stay within a shrinking envelope.
+    // Each height unit above maxK costs slopePerLayer units of lateral reach.
+    if (isAboveTop) {
+      const heightAbove = nkk - maxK
+      const allowedLat = maxLat - heightAbove * slopePerLayer
+      if (lat > allowedLat) continue  // outside pyramid, never grows
+    }
 
-    // b/a captures surface type:
-    //   1.0 = corner [1,1,1] or edge [1,1,0] direction from centroid → grows
-    //   0.0 = face-center [1,0,0] direction → hollow
-    const ratio = a > 0.5 ? b / a : 1.0
+    // ── Hollow top-face gate ────────────────────────────────────────────────
+    // Only the TOP FACE (sites in the new layer above maxK) has a hollow centre.
+    // Hollow zone: lateral position < hollowFraction * current base radius.
+    if (isAboveTop && maxLat > 0) {
+      if (lat / maxLat < hollowFraction) continue  // face centre, permanently hollow
+    }
 
-    // Add slight fuzz at the boundary so the hollow edge looks natural, not aliased.
-    const fuzz = (Math.random() - 0.5) * params.temperature * 0.15
-    if (ratio + fuzz < hollowThreshold) continue  // permanently in hollow zone
+    // ── BCF step-flow kinetics ──────────────────────────────────────────────
+    // Growth rate depends on local step-edge character:
+    //   • below=true + lateral edge → step edge (fast)
+    //   • below=true + surrounded    → flat terrace (nucleation only, slow)
+    //   • below=false + lateral nbrs → lateral wall fill (medium)
+    const below = filled.has(key(ni, nj, nkk - 1))
+    const inPlane = (
+      (filled.has(key(ni+1, nj, nkk)) ? 1 : 0) +
+      (filled.has(key(ni-1, nj, nkk)) ? 1 : 0) +
+      (filled.has(key(ni, nj+1, nkk)) ? 1 : 0) +
+      (filled.has(key(ni, nj-1, nkk)) ? 1 : 0)
+    )
+    const emptyInPlane = 4 - inPlane
 
-    // All non-hollow surface sites grow probabilistically
-    const noise = (Math.random() - 0.5) * params.temperature
-    const p = Math.min(1, Math.max(0, params.supersaturation * coolingFactor + noise))
+    let p = 0
+
+    if (below && emptyInPlane > 0) {
+      // Step edge — primary growth site
+      // Upward new-layer growth is faster than lateral step-flow at existing heights
+      p = isAboveTop
+        ? params.supersaturation * coolingFactor
+        : params.supersaturation * (1 / params.anisotropy) * coolingFactor
+    } else if (below && emptyInPlane === 0) {
+      // Flat terrace: requires thermal nucleation only
+      p = params.temperature * 0.012
+    } else if (!below && inPlane >= 1) {
+      // Lateral wall fill: sites on the pyramid sides supported laterally
+      p = params.supersaturation * (0.8 / params.anisotropy) * coolingFactor
+    }
+
+    const noise = (Math.random() - 0.5) * params.temperature * 0.08
+    p = Math.min(1, Math.max(0, p + noise))
     if (Math.random() < p) nextFilled.set(nk, step + 1)
   }
 
