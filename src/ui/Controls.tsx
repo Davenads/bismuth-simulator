@@ -23,7 +23,7 @@ export function Controls() {
         onChange: (v) => setParams({ temperature: v }),
       },
       defectRate: {
-        value: 0.005, min: 0.0, max: 0.05, step: 0.001, label: 'Defect Rate',
+        value: 0.0, min: 0.0, max: 0.05, step: 0.001, label: 'Defect Rate',
         onChange: (v) => setParams({ defectRate: v }),
       },
       seedCount: {
@@ -35,7 +35,7 @@ export function Controls() {
         onChange: (v) => setParams({ gridSize: v }),
       },
       maxSteps: {
-        value: 200, min: 50, max: 500, step: 10, label: 'Max Steps',
+        value: 400, min: 100, max: 800, step: 25, label: 'Max Steps',
         onChange: (v) => setParams({ maxSteps: v }),
       },
     }),

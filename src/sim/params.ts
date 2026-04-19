@@ -14,8 +14,8 @@ export const DEFAULT_PARAMS: SimParams = {
   coolingRate: 0.25,
   supersaturation: 0.55,
   anisotropy: 10.0,
-  defectRate: 0.002,
+  defectRate: 0.0,
   seedCount: 1,
   temperature: 0.15,
-  maxSteps: 200,
+  maxSteps: 400,
 }
